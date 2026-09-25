@@ -6,16 +6,11 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
-import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanResult
-import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
-import dev.vibe.realmebuds.bluetooth.OpoProtocol.toHexString
 import dev.vibe.realmebuds.bluetooth.TouchAction
 import dev.vibe.realmebuds.bluetooth.TouchSide
 import dev.vibe.realmebuds.bluetooth.TouchType
@@ -23,7 +18,6 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.ArrayDeque
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 class OpoBluetoothClient(
@@ -32,7 +26,6 @@ class OpoBluetoothClient(
 ) {
     interface Listener {
         fun onStatus(message: String)
-        fun onScanningChanged(scanning: Boolean)
         fun onConnectingChanged(connecting: Boolean)
         fun onConnectionDiagnostics(
             bondedDeviceFound: Boolean,
@@ -42,7 +35,6 @@ class OpoBluetoothClient(
         fun onConnected(deviceName: String)
         fun onDisconnected()
         fun onPacketReceived(source: String, data: ByteArray)
-        fun onBleAdvertisement(summary: String)
     }
 
     private sealed interface Operation {
@@ -62,24 +54,11 @@ class OpoBluetoothClient(
     private var ioThread: Thread? = null
     private var currentOperation: Operation? = null
     private var seqNum = 0
-    private var isScanning = false
     private var isConnecting = false
 
     private val connectionTimeoutRunnable = Runnable {
         if (isConnecting) {
             failConnection("Timeout połączenia RFCOMM")
-        }
-    }
-
-    private val scanCallback = object : ScanCallback() {
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            listener.onBleAdvertisement(result.toSummary())
-        }
-
-        override fun onScanFailed(errorCode: Int) {
-            isScanning = false
-            listener.onScanningChanged(false)
-            listener.onStatus("Diagnostyka BLE nie powiodła się: $errorCode")
         }
     }
 
@@ -90,15 +69,11 @@ class OpoBluetoothClient(
     }
 
     fun requiredPermissions(): Array<String> {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN)
-        } else {
-            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
+        return arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN)
     }
 
     @SuppressLint("MissingPermission")
-    fun connectToBondedHeadphones() {
+    fun connectToBondedHeadphones(skipInit: Boolean = false) {
         if (!hasRuntimePermissions()) {
             listener.onStatus("Brakuje uprawnień Bluetooth")
             return
@@ -110,7 +85,6 @@ class OpoBluetoothClient(
             return
         }
 
-        stopBleDiagnostics()
         disposed.set(true)
         disconnectSocket(notify = false)
         operationQueue.clear()
@@ -156,53 +130,15 @@ class OpoBluetoothClient(
         handler.postDelayed(connectionTimeoutRunnable, CONNECTION_TIMEOUT_MS)
 
         ioThread = Thread {
-            runRfcommConnection(target)
+            runRfcommConnection(target, skipInit)
         }.also { thread ->
             thread.name = "RealmeBudsRfcomm"
             thread.start()
         }
     }
 
-    @SuppressLint("MissingPermission")
-    fun startBleDiagnostics() {
-        if (!hasRuntimePermissions()) {
-            listener.onStatus("Brakuje uprawnień Bluetooth")
-            return
-        }
-
-        val bluetoothAdapter = adapter
-        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
-            listener.onStatus("Bluetooth jest wyłączony")
-            return
-        }
-
-        val scanner = bluetoothAdapter.bluetoothLeScanner
-        if (scanner == null) {
-            listener.onStatus("Skaner BLE niedostępny")
-            return
-        }
-
-        if (isScanning) return
-        isScanning = true
-        listener.onScanningChanged(true)
-        listener.onStatus("Diagnostyka BLE aktywna")
-        scanner.startScan(
-            null,
-            ScanSettings.Builder()
-                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                .build(),
-            scanCallback,
-        )
-        handler.postDelayed({ stopBleDiagnostics("Diagnostyka BLE zakończona") }, BLE_DIAGNOSTICS_MS)
-    }
-
-    fun stopBleDiagnostics() {
-        stopBleDiagnostics(message = null)
-    }
-
     fun disconnect() {
         disposed.set(true)
-        stopBleDiagnostics()
         handler.removeCallbacks(connectionTimeoutRunnable)
         isConnecting = false
         listener.onConnectingChanged(false)
@@ -215,20 +151,6 @@ class OpoBluetoothClient(
         enqueue(Operation.WritePacket("QUERY ANC", OpoProtocol.rfcommQueryAnc(nextSeq())))
         enqueue(Operation.Delay(500))
         enqueue(Operation.WritePacket("ANC: ${mode.label}", OpoProtocol.rfcommSetAnc(mode, nextSeq())))
-    }
-
-    fun queryBattery() {
-        enqueue(Operation.WritePacket("Bateria", OpoProtocol.rfcommBatteryRequest(nextSeq())))
-    }
-
-    fun queryDeviceInfo() {
-        listener.onStatus("Info test: eksperymentalna komenda diagnostyczna")
-        enqueue(Operation.WritePacket("Info test", OpoProtocol.deviceInfoQuery()))
-    }
-
-    fun queryEq() {
-        listener.onStatus("EQ test: eksperymentalna komenda diagnostyczna")
-        enqueue(Operation.WritePacket("EQ test", OpoProtocol.eqQuery()))
     }
 
     fun setTouchConfig(
@@ -249,7 +171,7 @@ class OpoBluetoothClient(
     }
 
     @SuppressLint("MissingPermission")
-    private fun runRfcommConnection(device: BluetoothDevice) {
+    private fun runRfcommConnection(device: BluetoothDevice, skipInit: Boolean = false) {
         var reportCleanDisconnect = false
         try {
             val activeSocket = device.createRfcommSocketToServiceRecord(OpoProtocol.OPO_SERVICE_UUID)
@@ -262,7 +184,7 @@ class OpoBluetoothClient(
                 listener.onConnectingChanged(false)
                 listener.onConnected(device.safeName() ?: "realme Buds")
                 listener.onStatus("Połączono przez RFCOMM")
-                queueInitialization()
+                if (!skipInit) queueInitialization()
             }
 
             readLoop(activeSocket.inputStream)
@@ -353,15 +275,6 @@ class OpoBluetoothClient(
         }.start()
     }
 
-    @SuppressLint("MissingPermission")
-    private fun stopBleDiagnostics(message: String?) {
-        if (!isScanning) return
-        adapter?.bluetoothLeScanner?.stopScan(scanCallback)
-        isScanning = false
-        listener.onScanningChanged(false)
-        if (message != null) listener.onStatus(message)
-    }
-
     private fun failConnection(message: String) {
         handler.removeCallbacks(connectionTimeoutRunnable)
         isConnecting = false
@@ -399,47 +312,6 @@ class OpoBluetoothClient(
     private fun isExactTarget(name: String?): Boolean =
         name?.equals("realme Buds Air 5 Pro", ignoreCase = true) == true
 
-    private fun ScanResult.toSummary(): String {
-        val record = scanRecord
-        val name = record?.deviceName ?: device.safeName() ?: "bez nazwy"
-        val services = record?.serviceUuids
-            ?.joinToString(",") { parcelUuid -> parcelUuid.uuid.shortUuid() }
-            .orEmpty()
-        val manufacturerData = record?.manufacturerSpecificData?.let { sparseArray ->
-            (0 until sparseArray.size()).joinToString(",") { index ->
-                val key = sparseArray.keyAt(index)
-                val value = sparseArray.valueAt(index).toHexString()
-                "%04X:$value".format(key)
-            }
-        }.orEmpty()
-        val serviceData = record?.serviceData
-            ?.entries
-            ?.joinToString(",") { entry ->
-                "${entry.key.uuid.shortUuid()}:${entry.value.toHexString()}"
-            }
-            .orEmpty()
-
-        return buildString {
-            append(name)
-            append(" RSSI=")
-            append(rssi)
-            append(" ")
-            append(device.address)
-            if (services.isNotBlank()) append(" services=[$services]")
-            if (manufacturerData.isNotBlank()) append(" mfg=[$manufacturerData]")
-            if (serviceData.isNotBlank()) append(" data=[$serviceData]")
-        }
-    }
-
-    private fun UUID.shortUuid(): String {
-        val value = toString()
-        return when {
-            value.endsWith("-0000-1000-8000-00805f9b34fb") -> value.substring(4, 8).uppercase()
-            value.endsWith("-d102-11e1-9b23-00025b00a5a5") -> value.substring(0, 8).uppercase()
-            else -> value
-        }
-    }
-
     private fun Throwable.cleanMessage(): String =
         message ?: javaClass.simpleName
 
@@ -447,7 +319,6 @@ class OpoBluetoothClient(
 
     companion object {
         private const val CONNECTION_TIMEOUT_MS = 12_000L
-        private const val BLE_DIAGNOSTICS_MS = 15_000L
         private const val WRITE_DELAY_MS = 150L
     }
 }

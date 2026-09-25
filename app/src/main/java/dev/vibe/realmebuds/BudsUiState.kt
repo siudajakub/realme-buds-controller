@@ -1,12 +1,12 @@
 package dev.vibe.realmebuds
 
+import dev.vibe.realmebuds.bluetooth.AncMode
 import dev.vibe.realmebuds.bluetooth.TouchAction
 import dev.vibe.realmebuds.bluetooth.TouchSide
 import dev.vibe.realmebuds.bluetooth.TouchType
 
 data class BudsUiState(
     val permissionsGranted: Boolean = false,
-    val scanning: Boolean = false,
     val connecting: Boolean = false,
     val connected: Boolean = false,
     val deviceName: String? = null,
@@ -22,6 +22,7 @@ data class BudsUiState(
     val leftBattery: Int? = null,
     val rightBattery: Int? = null,
     val caseBattery: Int? = null,
-    val bleAdvertisements: List<String> = emptyList(),
+    val ancMode: AncMode? = null,
+    val enabledTileModes: List<AncMode> = listOf(AncMode.On, AncMode.Transparency, AncMode.Off),
     val logLines: List<String> = emptyList(),
 )

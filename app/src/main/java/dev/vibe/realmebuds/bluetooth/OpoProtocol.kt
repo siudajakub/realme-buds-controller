@@ -54,25 +54,11 @@ data class PacketSummary(
     val title: String,
     val batteryLevels: BatteryLevels? = null,
     val firmwareVersion: String? = null,
+    val ancMode: AncMode? = null,
 )
 
 object OpoProtocol {
     val OPO_SERVICE_UUID: UUID = UUID.fromString("0000079a-d102-11e1-9b23-00025b00a5a5")
-    val OPO_WRITE_CHAR_UUID: UUID = UUID.fromString("0100079a-d102-11e1-9b23-00025b00a5a5")
-    val OPO_NOTIFY_CHAR_UUID: UUID = UUID.fromString("0200079a-d102-11e1-9b23-00025b00a5a5")
-    val FE2C_SERVICE_UUID: UUID = UUID.fromString("fe2c1234-8366-4814-8eb0-01de32100bea")
-
-    val CLIENT_CONFIG_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-
-    val defaultRegisterToken: ByteArray = byteArrayOf(0xB5.toByte(), 0x50, 0xA0.toByte(), 0x69)
-
-    fun hello(): ByteArray = bytes("AA 07 00 00 00 01 23 00 00 12")
-
-    fun register(token: ByteArray): ByteArray {
-        return bytes("AA 0C 00 00 00 85 41 05 00 00") + token
-    }
-
-    fun queryAnc(): ByteArray = bytes("AA 09 00 00 04 82 44 02 00 00 F2")
 
     fun setAnc(mode: AncMode): ByteArray = byteArrayOf(
         0xAA.toByte(),
@@ -89,12 +75,6 @@ object OpoProtocol {
         mode.modeByte.toByte(),
     )
 
-    fun batteryQuery(): ByteArray = bytes("AA 07 00 00 06 01 25 00 00")
-
-    fun deviceInfoQuery(): ByteArray = bytes("AA 07 00 00 03 01 28 00 00")
-
-    fun eqQuery(): ByteArray = bytes("AA 07 00 00 05 01 2B 00 00")
-
     fun rfcommFirmwareRequest(seq: Int): ByteArray =
         rfcommMessage(command = 0x0105, seq = seq)
 
@@ -108,7 +88,7 @@ object OpoProtocol {
         rfcommMessage(command = 0x8204, seq = seq, payload = byteArrayOf(0x00, 0xF2.toByte()))
 
     fun rfcommSetAnc(mode: AncMode, seq: Int): ByteArray =
-        rfcommMessage(command = 0x0404, seq = seq, payload = byteArrayOf(0x01, 0x01, mode.modeByte.toByte()))
+        rfcommMessage(command = 0x0404, seq = seq, payload = byteArrayOf(0x03, 0x01, mode.modeByte.toByte()))
 
     fun rfcommSetTouchConfig(
         side: TouchSide,
@@ -139,7 +119,13 @@ object OpoProtocol {
             0x8105 -> PacketSummary(title = "Firmware", firmwareVersion = parseFirmware(bytes))
             0x8108 -> PacketSummary(title = "Konfiguracja")
             0x8401 -> PacketSummary(title = "ACK konfiguracji")
-            0x8204, 0x0404 -> PacketSummary(title = "ANC")
+            0x8204, 0x0404 -> {
+                val mode = if (bytes.size > 11) {
+                    val modeByte = bytes[11].toInt()
+                    AncMode.entries.find { it.modeByte == modeByte }
+                } else null
+                PacketSummary(title = "ANC", ancMode = mode)
+            }
             0x0105, 0x0106, 0x0108 -> PacketSummary(title = "Żądanie")
             0x8100, 0x8500 -> PacketSummary(title = "ACK rejestracji")
             else -> PacketSummary(
@@ -256,11 +242,6 @@ object OpoProtocol {
 
     fun ByteArray.toHexString(): String =
         joinToString(" ") { byte -> "%02X".format(Locale.ROOT, byte.toInt() and 0xff) }
-
-    private fun bytes(hex: String): ByteArray =
-        parseHex(hex) ?: error("Invalid built-in packet: $hex")
-
-    private fun Int.hex2(): String = toString(16).uppercase(Locale.ROOT).padStart(2, '0')
 
     private fun Int.hex4(): String = toString(16).uppercase(Locale.ROOT).padStart(4, '0')
 

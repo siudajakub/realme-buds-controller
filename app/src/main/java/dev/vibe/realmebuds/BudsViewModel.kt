@@ -1,6 +1,7 @@
 package dev.vibe.realmebuds
 
 import android.app.Application
+import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import dev.vibe.realmebuds.bluetooth.AncMode
 import dev.vibe.realmebuds.bluetooth.OpoBluetoothClient
@@ -25,7 +26,16 @@ class BudsViewModel(application: Application) : AndroidViewModel(application), O
     )
     val uiState: StateFlow<BudsUiState> = _uiState.asStateFlow()
 
-    fun requiredPermissions(): Array<String> = client.requiredPermissions()
+    init {
+        val prefs = application.getSharedPreferences("realme_buds_settings", Context.MODE_PRIVATE)
+        val savedModes = prefs.getStringSet("enabled_tile_modes", null)
+        val initialModes = if (savedModes != null) {
+            savedModes.mapNotNull { name -> AncMode.entries.find { it.name == name } }
+        } else {
+            listOf(AncMode.On, AncMode.Transparency, AncMode.Off)
+        }
+        _uiState.update { it.copy(enabledTileModes = initialModes) }
+    }
 
     fun refreshPermissions() {
         _uiState.update { state -> state.copy(permissionsGranted = client.hasRuntimePermissions()) }
@@ -47,20 +57,25 @@ class BudsViewModel(application: Application) : AndroidViewModel(application), O
         _uiState.update { state -> state.copy(customHexInput = value) }
     }
 
+    fun toggleTileMode(mode: AncMode) {
+        _uiState.update { state ->
+            val current = state.enabledTileModes.toMutableList()
+            if (current.contains(mode)) {
+                if (current.size > 1) current.remove(mode)
+            } else {
+                current.add(mode)
+                current.sortBy { it.ordinal } // Keep them in logical order
+            }
+
+            val prefs = getApplication<Application>().getSharedPreferences("realme_buds_settings", Context.MODE_PRIVATE)
+            prefs.edit().putStringSet("enabled_tile_modes", current.map { it.name }.toSet()).apply()
+
+            state.copy(enabledTileModes = current)
+        }
+    }
+
     fun setAncMode(mode: AncMode) {
         client.setAnc(mode)
-    }
-
-    fun queryBattery() {
-        client.queryBattery()
-    }
-
-    fun queryDeviceInfo() {
-        client.queryDeviceInfo()
-    }
-
-    fun queryEq() {
-        client.queryEq()
     }
 
     fun sendCustomHex() {
@@ -114,23 +129,10 @@ class BudsViewModel(application: Application) : AndroidViewModel(application), O
         )
     }
 
-    fun startBleDiagnostics() {
-        _uiState.update { state -> state.copy(bleAdvertisements = emptyList()) }
-        client.startBleDiagnostics()
-    }
-
-    fun stopBleDiagnostics() {
-        client.stopBleDiagnostics()
-    }
-
     override fun onStatus(message: String) {
         _uiState.update { state ->
             state.copy(status = message).withLog("• $message")
         }
-    }
-
-    override fun onScanningChanged(scanning: Boolean) {
-        _uiState.update { state -> state.copy(scanning = scanning) }
     }
 
     override fun onConnectingChanged(connecting: Boolean) {
@@ -155,7 +157,6 @@ class BudsViewModel(application: Application) : AndroidViewModel(application), O
         _uiState.update { state ->
             state.copy(
                 connected = true,
-                scanning = false,
                 connecting = false,
                 deviceName = deviceName,
                 status = "Połączono",
@@ -167,7 +168,6 @@ class BudsViewModel(application: Application) : AndroidViewModel(application), O
         _uiState.update { state ->
             state.copy(
                 connected = false,
-                scanning = false,
                 connecting = false,
                 deviceName = null,
                 status = "Nie połączono",
@@ -177,22 +177,21 @@ class BudsViewModel(application: Application) : AndroidViewModel(application), O
 
     override fun onPacketReceived(source: String, data: ByteArray) {
         val summary = OpoProtocol.summarize(data)
+
+        if (summary?.ancMode != null) {
+            _uiState.update { state -> state.copy(ancMode = summary.ancMode) }
+            val prefs = getApplication<Application>().getSharedPreferences("realme_buds_settings", Context.MODE_PRIVATE)
+            prefs.edit().putInt("anc_mode", summary.ancMode.ordinal).apply()
+        }
+
         _uiState.update { state ->
             val battery = summary?.batteryLevels
             state.copy(
                 firmwareVersion = summary?.firmwareVersion ?: state.firmwareVersion,
                 leftBattery = if (battery != null) battery.left ?: state.leftBattery else state.leftBattery,
                 rightBattery = if (battery != null) battery.right ?: state.rightBattery else state.rightBattery,
-                caseBattery = if (battery != null) battery.caseLevel else state.caseBattery,
+                caseBattery = if (battery != null) battery.caseLevel ?: state.caseBattery else state.caseBattery,
             ).withLog("$source  ${data.toHexString()}${summary?.let { "  (${it.title})" } ?: ""}")
-        }
-    }
-
-    override fun onBleAdvertisement(summary: String) {
-        _uiState.update { state ->
-            state.copy(bleAdvertisements = (listOf(summary) + state.bleAdvertisements)
-                .distinct()
-                .take(MAX_BLE_ADVERTISEMENTS))
         }
     }
 
@@ -221,6 +220,5 @@ class BudsViewModel(application: Application) : AndroidViewModel(application), O
 
     companion object {
         private const val MAX_LOG_LINES = 120
-        private const val MAX_BLE_ADVERTISEMENTS = 30
     }
 }
